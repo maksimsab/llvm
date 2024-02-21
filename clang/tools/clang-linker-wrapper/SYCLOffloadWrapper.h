@@ -12,6 +12,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PropertySetIO.h"
 
 #include <string>
@@ -26,8 +27,68 @@ enum class SYCLBinaryImageFormat {
   BIF_LLVMBC  // LLVM bitcode
 };
 
+class LazyMemoryBuffer {
+private:
+  std::string Filename;
+  std::unique_ptr<llvm::MemoryBuffer> MB;
+  bool isMaterialized = false;
+
+public:
+  LazyMemoryBuffer() = default;
+  LazyMemoryBuffer(const LazyMemoryBuffer &) = delete;
+  LazyMemoryBuffer &operator=(const LazyMemoryBuffer &) = delete;
+  LazyMemoryBuffer(LazyMemoryBuffer &&) noexcept = default;
+  LazyMemoryBuffer &operator=(LazyMemoryBuffer &&) noexcept = default;
+
+  LazyMemoryBuffer(llvm::StringRef Filename) : Filename(std::move(Filename)) {}
+
+  llvm::Error materialize() {
+    auto MBOrErr = llvm::MemoryBuffer::getFile(Filename, false, false);
+    if (!MBOrErr)
+      return llvm::createFileError(Filename, MBOrErr.getError());
+
+    MB = std::move(*MBOrErr);
+    isMaterialized = true;
+    return llvm::Error::success();
+  }
+
+  llvm::MemoryBuffer &getBuffer() {
+    assert(isMaterialized && "MemoryBuffer isn't materialized");
+    return *MB;
+  }
+
+  const llvm::MemoryBuffer &getBuffer() const {
+    assert(isMaterialized && "MemoryBuffer isn't materialized");
+    return *MB;
+  }
+
+  size_t getBufferSize() const {
+    assert(isMaterialized && "MemoryBuffer isn't materialized");
+    return MB->getBufferEnd() - MB->getBufferStart();
+  }
+
+  void release() {
+    MB.release();
+    isMaterialized = false;
+  }
+};
+
 struct SYCLImage {
-  std::vector<char> Image;
+  SYCLImage() = default;
+  SYCLImage(SYCLImage &) = delete;
+  SYCLImage &operator=(SYCLImage &) = delete;
+  SYCLImage(SYCLImage &&) noexcept = default;
+  SYCLImage &operator=(SYCLImage &&) noexcept = default;
+
+  SYCLImage(LazyMemoryBuffer Buf,
+            const llvm::util::PropertySetRegistry &Registry,
+            llvm::StringRef Entries, llvm::StringRef Target = "")
+      : Image(std::move(Buf)), PropertyRegistry(std::move(Registry)),
+        Entries(Entries.begin(), Entries.size()),
+        Target(Target.begin(), Target.size()) {}
+
+  LazyMemoryBuffer Image;
+  // std::vector<char> Image;
   llvm::util::PropertySetRegistry PropertyRegistry;
 
   std::string Entries;

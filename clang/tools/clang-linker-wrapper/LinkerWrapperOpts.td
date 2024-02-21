@@ -2,6 +2,7 @@ include "llvm/Option/OptParser.td"
 
 def WrapperOnlyOption : OptionFlag;
 def DeviceOnlyOption : OptionFlag;
+// def SYCLPostLinkOnlyOption : OptionFlag;
 
 def help : Flag<["--"], "help">,
   HelpText<"Display available options (--help-hidden for more)">;
@@ -154,10 +155,20 @@ def sycl_target_link_options_EQ :
   Flags<[WrapperOnlyOption]>,
   HelpText<"Options that are passed to target linker during a linking of shared device code.">;
 
+// TODO: add options for splitting of SYCL code.
+def sycl_module_split_mode :
+  Joined<["-"], "sycl-module-split-mode">,
+  Flags<[WrapperOnlyOption]>,
+  Values<"none,auto,kernel,source">,
+  HelpText<"TODO">;
+
 // Special option to pass in sycl-post-link options
 def sycl_post_link_options_EQ : Joined<["-"], "sycl-post-link-options=">,
   Flags<[WrapperOnlyOption]>,
   HelpText<"Options that will control sycl-post-link step">;
+def print_splitted_modules : Flag<["--"], "print-splitted-modules">,
+  Flags<[WrapperOnlyOption]>,
+  HelpText<"Print the splitted module IRs for testing">;
 
 // Special option to pass in llvm-spirv options
 def llvm_spirv_options_EQ : Joined<["-"], "llvm-spirv-options=">,

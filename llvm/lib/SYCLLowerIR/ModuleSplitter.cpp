@@ -12,16 +12,20 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IRPrinter/IRPrintingPasses.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/SYCLLowerIR/DeviceGlobals.h"
 #include "llvm/SYCLLowerIR/LowerInvokeSimd.h"
 #include "llvm/SYCLLowerIR/SYCLUtils.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/IPO/StripDeadPrototypes.h"
@@ -733,6 +737,14 @@ void EntryPointGroup::rebuild(const Module &M) {
       Functions.insert(const_cast<Function *>(&F));
 }
 
+std::string ModuleDesc::makeSymbolTable() const {
+  std::string ST;
+  for (const Function *F : EntryPoints.Functions)
+    ST += (Twine(F->getName()) + "\n").str();
+
+  return ST;
+}
+
 namespace {
 // This is a helper class, which allows to group/categorize function based on
 // provided rules. It is intended to be used in device code split
@@ -1110,6 +1122,116 @@ SmallVector<ModuleDesc, 2> splitByESIMD(ModuleDesc &&MD,
   }
 
   return Result;
+}
+
+// TODO: make SYCLImage-like structure where IR is saved in FS or RAM.
+
+class LazyFile {
+public:
+  std::string Path;
+  std::unique_ptr<Module> M;
+  bool Tumbler = false;
+
+  std::unique_ptr<Module> getModule() { return nullptr; }
+
+  // constructor with path
+  // constructor with Module
+};
+
+struct GlobalBinImageProps {
+  bool EmitKernelParamInfo;
+  bool EmitProgramMetadata;
+  bool EmitExportedSymbols;
+  bool EmitDeviceGlobalPropSet;
+};
+
+Error saveModuleIRInFile(Module &M, StringRef FilePath, bool OutputAssembly) {
+  int FD = -1;
+  if (std::error_code EC = sys::fs::openFileForWrite(FilePath, FD))
+    return errorCodeToError(EC);
+
+  raw_fd_ostream OS(FD, true);
+  ModulePassManager MPM;
+  ModuleAnalysisManager MAM;
+  PassBuilder PB;
+  PB.registerModuleAnalyses(MAM);
+  if (OutputAssembly)
+    MPM.addPass(PrintModulePass(OS));
+  else
+    MPM.addPass(BitcodeWriterPass(OS));
+
+  MPM.run(M, MAM);
+  return Error::success();
+}
+
+Expected<SplittedImage> saveModuleDesc(ModuleDesc &MD, std::string Prefix,
+                                       bool OutputAssembly) {
+  if (MD.isESIMD())
+    Prefix += "_esimd";
+
+  SplittedImage SI;
+  // GlobalBinImageProps Props = {EmitKernelParamInfo, EmitProgramMetadata,
+  // EmitExportedSymbols, DeviceGlobals};
+  GlobalBinImageProps Props = {true, true, true, true};
+
+  Prefix += OutputAssembly ? ".ll" : ".bc";
+  Error E = saveModuleIRInFile(MD.getModule(), Prefix, OutputAssembly);
+  if (E)
+    return std::move(E);
+
+  SI.ModuleFilePath = Prefix;
+  // TODO: generate properties.
+  SI.Symbols = MD.makeSymbolTable();
+
+  return std::move(SI);
+}
+
+// FIXME: return IRs saved in files, everything else in SYCLImage structure.
+Expected<std::vector<SplittedImage>>
+splitSYCLModule(std::unique_ptr<Module> M, ModuleSplitterSettings Settings) {
+  ModuleDesc MD = std::move(M); // makeModuleDesc() ?
+  // FIXME: false arguments are temporary for now.
+  auto Splitter =
+      getDeviceCodeSplitter(std::move(MD), Settings.Mode, false, false);
+  size_t ID = 0;
+  std::vector<SplittedImage> OutputImages;
+  while (Splitter->hasMoreSplits()) {
+    ModuleDesc MD2 = Splitter->nextSplit();
+    MD2.fixupLinkageOfDirectInvokeSimdTargets();
+    // TODO: add ESIMD handling
+
+    std::string OutIRFileName =
+        (Settings.Prefix + "_" + std::to_string(ID)).str();
+    auto SplittedImageOrErr =
+        saveModuleDesc(MD2, OutIRFileName, Settings.OutputAssembly);
+    if (!SplittedImageOrErr)
+      return SplittedImageOrErr.takeError();
+
+    OutputImages.emplace_back(std::move(*SplittedImageOrErr));
+    ++ID;
+  }
+
+  return OutputImages;
+}
+
+std::unique_ptr<Module> SplittedImage::getModule() { return nullptr; }
+
+std::unique_ptr<const Module> SplittedImage::getModule() const {
+  return nullptr;
+}
+
+void SplittedImage::dump(raw_ostream &OS, StringRef Prefix) const {
+  OS << Prefix << " IR\n";
+  if (auto M = getModule())
+    OS << *M << "\n";
+  else
+    OS << "IR unavalailable\n"; // This might be because this is SPIRV or
+                                // something else.
+
+  OS << Prefix << " Properties\n";
+  Properties.write(OS);
+  OS << Prefix << " Symbols\n";
+  OS << Symbols << "\n";
 }
 
 } // namespace module_split
