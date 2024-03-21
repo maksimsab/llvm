@@ -941,13 +941,12 @@ Expected<StringRef> wrapSYCLBinariesFromFile(
 
   SmallVector<SYCLImage> Images;
   for (auto &SI : SplittedImages) {
-    // auto MB = MemoryBuffer::getMemBuffer(SI.Properties);
-    // auto PropSetOrErr = util::PropertySetRegistry::read(&*MB);
-    // if (!PropSetOrErr)
-    //   return PropSetOrErr.takeError();
+    auto MBOrDesc = MemoryBuffer::getFile(SI.ModuleFilePath);
+    if (!MBOrDesc)
+      return createFileError(SI.ModuleFilePath, MBOrDesc.getError());
 
-    Images.emplace_back(LazyMemoryBuffer(SI.ModuleFilePath), SI.Properties,
-                        SI.Symbols, Target);
+    Images.emplace_back(std::move(*MBOrDesc), SI.Properties, SI.Symbols,
+                        Target);
   }
   // for (SYCLImage &Image : Images)
   //   Image.Target = Target;

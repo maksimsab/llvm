@@ -555,7 +555,7 @@ struct Wrapper {
     if (Image.Target == "native_cpu")
       Binary = addDeclarationsForNativeCPU(Image.Entries);
     else {
-      auto &MB = Image.Image.getBuffer();
+      auto &MB = *Image.Image;
       Binary = addDeviceImageToModule(
           ArrayRef<char>(MB.getBufferStart(), MB.getBufferEnd()),
           Twine(OffloadKindTag) + ImageID + ".data", Image.Target);
@@ -577,7 +577,7 @@ struct Wrapper {
         PropSets.first, PropSets.second);
 
     if (Options.EmitRegistrationFunctions)
-      emitRegistrationFunctions(Binary.first, Image.Image.getBufferSize(),
+      emitRegistrationFunctions(Binary.first, Image.Image->getBufferSize(),
                                 ImageID, OffloadKindTag);
 
     return WrappedImage;
@@ -675,9 +675,6 @@ struct Wrapper {
     SmallVector<Constant *> WrappedImages;
     WrappedImages.reserve(Images.size());
     for (size_t i = 0; i != Images.size(); ++i) {
-      if (Error E = Images[i].Image.materialize())
-        return std::move(E);
-
       WrappedImages.push_back(wrapImage(Images[i], Twine(i), OffloadKindTag));
       Images[i].Image.release();
     }
