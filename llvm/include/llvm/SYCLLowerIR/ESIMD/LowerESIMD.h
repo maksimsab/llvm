@@ -23,12 +23,19 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Passes/OptimizationLevel.h"
 
 namespace llvm {
 
 class FunctionPass;
 class ModulePass;
 class PassRegistry;
+
+namespace module_split {
+
+class ModuleDesc;
+
+}
 
 /// SPIRV (ESIMD) target specific pass to transform ESIMD specific constructs
 /// like intrinsics to a form parsable by the ESIMD-aware SPIRV translator.
@@ -98,6 +105,9 @@ class ESIMDLowerSLMReservationCalls
 public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
 };
+
+// TODO: add doc
+bool lowerESIMDConstructs(module_split::ModuleDesc &MD, OptimizationLevel OL, bool SplitEsimd);
 
 } // namespace llvm
 
