@@ -310,6 +310,9 @@ struct ModuleSplitterSettings {
   IRSplitMode Mode;
   bool OutputAssembly = false; // Bitcode or LLVM IR.
   StringRef OutputPrefix;
+
+  bool SplitESIMD = false;
+  bool LowerESIMD = false;
 };
 
 /// Parses the output table file from sycl-post-link tool.

@@ -1353,6 +1353,17 @@ Expected<std::vector<SplitModule>> parseSplitModulesFromFile(StringRef File) {
   return Modules;
 }
 
+SmallVector<ModuleDesc, 2> handleESIMD(ModuleDesc MD) {
+  SmallVector<ModuleDesc, 2> Result = splitByESIMD(std::move(MD), EmitOnlyKernelsAsEntryPoints);
+  // TODO: emit warning regarding SYCL and ESIMD entry points.
+
+  for (auto &MD : Result) {
+    lowerESIMDConstructs(MD, OL, SplitEsimd);
+  }
+
+  
+}
+
 Expected<std::vector<SplitModule>>
 splitSYCLModule(std::unique_ptr<Module> M, ModuleSplitterSettings Settings) {
   ModuleDesc MD = std::move(M); // makeModuleDesc() ?
@@ -1367,9 +1378,12 @@ splitSYCLModule(std::unique_ptr<Module> M, ModuleSplitterSettings Settings) {
     ModuleDesc MD2 = Splitter->nextSplit();
     MD2.fixupLinkageOfDirectInvokeSimdTargets();
 
+    SmallVector<ModuleDesc, 2> MMs = handleESIMD(std::move(MD2), SplitOccured);
+    assert(MMs.size() && "at least one module is expected after ESIMD split");
+
     std::string OutIRFileName = (Settings.OutputPrefix + "_" + Twine(ID)).str();
     auto SplittedImageOrErr =
-        saveModuleDesc(MD2, OutIRFileName, Settings.OutputAssembly);
+        saveModuleDesc(MMs, OutIRFileName, Settings.OutputAssembly);
     if (!SplittedImageOrErr)
       return SplittedImageOrErr.takeError();
 

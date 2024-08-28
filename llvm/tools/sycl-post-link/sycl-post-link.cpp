@@ -662,9 +662,12 @@ handleESIMD(module_split::ModuleDesc &&MDesc, bool &Modified,
   // unless -split-esimd option is specified. The graphs become disjoint
   // when linked back because functions shared between graphs are cloned and
   // renamed.
+
+  // сплит
   SmallVector<module_split::ModuleDesc, 2> Result = module_split::splitByESIMD(
       std::move(MDesc), EmitOnlyKernelsAsEntryPoints);
 
+  // странный ворнинг. может быть можно выкинуть
   if (Result.size() > 1 && SplitOccurred &&
       (SplitMode == module_split::SPLIT_PER_KERNEL) && !SplitEsimd) {
     // Controversial state reached - SYCL and ESIMD entry points resulting
