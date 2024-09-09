@@ -179,17 +179,18 @@ def sycl_post_link_options_EQ : Joined<["--", "-"], "sycl-post-link-options=">,
   Flags<[WrapperOnlyOption]>,
   HelpText<"Options that will control sycl-post-link step">;
 
+def use_sycl_post_link_tool : Flag<["--", "-"], "use-sycl-post-link-tool">,
+  Flags<[WrapperOnlyOption]>,
+  HelpText<"Use sycl-post-link tool. Turned on by default. Option will be removed when sycl-post-link tool become removed.">;
+
+def no_use_sycl_post_link_tool : Flag<["--", "-"], "no-use-sycl-post-link-tool">,
+  Flags<[WrapperOnlyOption]>,
+  HelpText<"Use SYCL library instead of sycl-post-link tool. Only for testing purposes.">; 
+
 def sycl_module_split_mode_EQ :
   Joined<["--", "-"], "sycl-module-split-mode=">,
   Flags<[WrapperOnlyOption]>,
   HelpText<"Option that turns on split library with the given split mode">;
-
-def sycl_spec_const_handling_mode_EQ : Joined<["--", "-"], "sycl-spec-const-handling-mode=">,
-  Flags<[WrapperOnlyOption]>,
-  HelpText<"Specialization constant's handling mode. Modes: native, emulation, default_values. "
-           "Native mode lowers specialization constants to native SPIRV instructions. "
-           "Emulation mode removes specialization constants and replaces it with emulation. "
-           "default_values mode generates new device images which are copies of output devices but contain specialization constants replaced with default values from specialization ids.">;
 
 // Special option to pass in llvm-spirv options
 def llvm_spirv_options_EQ : Joined<["--", "-"], "llvm-spirv-options=">,

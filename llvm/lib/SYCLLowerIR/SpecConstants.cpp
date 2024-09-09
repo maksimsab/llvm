@@ -1087,20 +1087,6 @@ bool SpecConstantsPass::collectSpecConstantDefaultValuesMetadata(
   return true;
 }
 
-std::optional<SpecConstantsPass::HandlingMode>
-llvm::convertStringToSpecConstMode(StringRef S) {
-  static const StringMap<SpecConstantsPass::HandlingMode> Values = {
-      {"default_values", SpecConstantsPass::HandlingMode::default_values},
-      {"emulation", SpecConstantsPass::HandlingMode::emulation},
-      {"native", SpecConstantsPass::HandlingMode::native}};
-
-  auto It = Values.find(S);
-  if (It == Values.end())
-    return std::nullopt;
-
-  return It->second;
-}
-
 StringRef
 llvm::convertSpecConstModeToString(llvm::SpecConstantsPass::HandlingMode HM) {
   static const DenseMap<SpecConstantsPass::HandlingMode, StringRef> Values = {
@@ -1124,4 +1110,8 @@ bool llvm::checkModuleContainsSpecConsts(const Module &M) {
   }
 
   return false;
+}
+
+bool processSpecConstants(std::unique_ptr<Module> M, SpecConstantsPass::HandlingMode Mode) {
+  
 }

@@ -83,4 +83,6 @@ StringRef convertSpecConstModeToString(SpecConstantsPass::HandlingMode HM);
 
 bool checkModuleContainsSpecConsts(const Module &M);
 
+bool processSpecConstants(std::unique_ptr<Module> M, SpecConstantsPass::HandlingMode Mode);
+
 } // namespace llvm

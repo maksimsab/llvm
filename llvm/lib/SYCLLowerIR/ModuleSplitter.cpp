@@ -487,6 +487,7 @@ bool ModuleDesc::processSpecConstants(SpecConstantsPass::HandlingMode Mode) {
   if (Mode == SpecConstantsPass::HandlingMode::default_values)
     return false;
 
+  // TODO: make processSpecConstants function in SpecConstants.cpp
   Props.SpecConstsMet = false;
   ModulePassManager MPM;
   ModuleAnalysisManager MAM;
@@ -1386,15 +1387,31 @@ Expected<std::vector<SplitModule>> parseSplitModulesFromFile(StringRef File) {
 }
 
 Expected<std::vector<SplitModule>>
-splitSYCLModule(std::unique_ptr<Module> M, ModuleSplitterSettings Settings) {
+splitSYCLModuleAndProcess(std::unique_ptr<Module> M, ModuleSplitterSettings Settings) {
   ModuleDesc MD = std::move(M);
+  std::vector<SplitModule> OutputImages;
+  if (Settings.Mode == IRSplitMode::SPLIT_NONE) {
+    // Just run the post-split processing of the given Module.
+    ModuleDesc MD = std::move(M);
+    auto SCMode = Settings.SpecConstantMode;
+    if (SCMode)
+      MD.processSpecConstants(*SCMode);
+    
+    SmallString<128> OutIRFileName = Settings.OutputPrefix + Twine("_0"); // TODO: check str()
+    auto ProcessedImageOrErr = saveModuleDesc(MD, OutIRFileName, Settings.OutputAssembly);
+    if (!ProcessedImageOrErr)
+      return ProcessedImageOrErr.takeError();
+
+    OutputImages.emplace_back(std::move(*ProcessedImageOrErr));
+    return OutputImages;
+  }
+
   // FIXME: false arguments are temporary for now.
   auto Splitter = getDeviceCodeSplitter(std::move(MD), Settings.Mode,
                                         /*IROutputOnly=*/false,
                                         /*EmitOnlyKernelsAsEntryPoints=*/false);
 
   size_t ID = 0;
-  std::vector<SplitModule> OutputImages;
   while (Splitter->hasMoreSplits()) {
     ModuleDesc MD2 = Splitter->nextSplit();
     MD2.fixupLinkageOfDirectInvokeSimdTargets();

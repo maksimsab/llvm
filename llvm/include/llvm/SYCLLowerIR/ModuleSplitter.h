@@ -312,7 +312,7 @@ struct SplitModule {
 };
 
 struct ModuleSplitterSettings {
-  IRSplitMode Mode;
+  IRSplitMode Mode = IRSplitMode::SPLIT_NONE;
   bool OutputAssembly = false; // Bitcode or LLVM IR.
   StringRef OutputPrefix;
   std::optional<SpecConstantsPass::HandlingMode> SpecConstantMode;
@@ -324,9 +324,10 @@ convertSplitterSettingsToString(const ModuleSplitterSettings &S);
 /// Parses the output table file from sycl-post-link tool.
 Expected<std::vector<SplitModule>> parseSplitModulesFromFile(StringRef File);
 
+// TODO: update doc
 /// Splits the given module \p M according to the given \p Settings.
 Expected<std::vector<SplitModule>>
-splitSYCLModule(std::unique_ptr<Module> M, ModuleSplitterSettings Settings);
+splitSYCLModuleAndProcess(std::unique_ptr<Module> M, ModuleSplitterSettings Settings);
 
 bool isESIMDFunction(const Function &F);
 bool canBeImportedFunction(const Function &F);

@@ -154,6 +154,8 @@ static std::atomic<bool> LTOError;
 
 static std::optional<llvm::module_split::IRSplitMode> SYCLModuleSplitMode;
 
+static bool UseSYCLPostLinkTool;
+
 SmallString<128> SPIRVDumpDir;
 
 using OffloadingImage = OffloadBinary::OffloadingImage;
@@ -702,6 +704,26 @@ getTripleBasedSYCLPostLinkOpts(const ArgList &Args,
     PostLinkArgs.push_back("-generate-device-image-default-spec-consts");
 }
 
+void getTripleBasedSYCLLibrarySettings(const ArgList &Args, module_split::ModuleSplitterSettings &Settings, const llvm::Triple T) {
+  const llvm::Triple HostTriple(Args.getLastArgValue(OPT_host_triple_EQ));
+  bool SYCLNativeCPU = (HostTriple == T);
+  bool IsAOT = T.isNVPTX() || T.isAMDGCN() || T.isSPIRAOT();
+  bool SpecConstsSupported = (!T.isNVPTX() && !T.isAMDGCN() &&
+                              !T.isSPIRAOT() && !SYCLNativeCPU);
+  if (Args.hasFlag(OPT_sycl_add_default_spec_consts_image,
+                   OPT_no_sycl_add_default_spec_consts_image, false) &&
+      IsAOT)
+    Settings.SpecConstantMode = llvm::SpecConstantsPass::HandlingMode::default_values;
+  else if (SpecConstsSupported)
+    Settings.SpecConstantMode = llvm::SpecConstantsPass::HandlingMode::native;
+  else
+    Settings.SpecConstantMode = llvm::SpecConstantsPass::HandlingMode::emulation;
+
+  bool NoSplit = !Args.hasArg(OPT_sycl_module_split_mode_EQ);
+  if (!Args.hasArg(OPT_sycl_module_split_mode_EQ) && (T.getSubArch() != llvm::Triple::SPIRSubArch_fpga))
+    Settings.Mode = llvm::module_split::SPLIT_AUTO;
+}
+
 /// Run sycl-post-link tool for SYCL offloading.
 /// 'InputFiles' is the list of input LLVM IR files.
 /// 'Args' encompasses all arguments required for linking and wrapping device
@@ -751,6 +773,7 @@ runSYCLPostLinkTool(ArrayRef<StringRef> InputFiles, const ArgList &Args) {
   return llvm::module_split::parseSplitModulesFromFile(*TempFileOrErr);
 }
 
+// TODO: fix this description
 /// Invokes SYCL Split library for SYCL offloading.
 ///
 /// \param InputFiles the list of input LLVM IR files.
@@ -759,15 +782,14 @@ runSYCLPostLinkTool(ArrayRef<StringRef> InputFiles, const ArgList &Args) {
 ///  library.
 /// \param Mode The splitting mode.
 /// \returns The vector of split modules.
-static Expected<std::vector<module_split::SplitModule>>
-runSYCLSplitLibrary(ArrayRef<StringRef> InputFiles, const ArgList &Args,
-                    module_split::IRSplitMode Mode) {
-  llvm::module_split::ModuleSplitterSettings Settings;
-  Settings.Mode = Mode;
+Expected<std::vector<module_split::SplitModule>>
+runSYCLPostLinkLibrary(ArrayRef<StringRef> InputFiles, const ArgList &Args) {
+  module_split::ModuleSplitterSettings Settings;
+  Settings.Mode = SYCLModuleSplitMode.value_or(module_split::IRSplitMode::SPLIT_NONE);
   Settings.OutputPrefix = "";
-  if (Args.hasArg(OPT_sycl_spec_const_handling_mode_EQ))
-    Settings.SpecConstantMode = convertStringToSpecConstMode(
-        Args.getLastArgValue(OPT_sycl_spec_const_handling_mode_EQ));
+
+  llvm::Triple T(Args.getLastArgValue(OPT_triple_EQ));
+  getTripleBasedSYCLLibrarySettings(Args, Settings, T);
 
   std::vector<module_split::SplitModule> SplitModules;
   for (StringRef InputFile : InputFiles) {
@@ -781,11 +803,11 @@ runSYCLSplitLibrary(ArrayRef<StringRef> InputFiles, const ArgList &Args,
       return createStringError(inconvertibleErrorCode(), Err.getMessage());
 
     auto SplitModulesOrErr =
-        module_split::splitSYCLModule(std::move(M), Settings);
+        module_split::splitSYCLModuleAndProcess(std::move(M), Settings);
     if (!SplitModulesOrErr)
       return SplitModulesOrErr.takeError();
 
-    auto &NewSplitModules = *SplitModulesOrErr;
+    auto &NewSplitModules = *SplitModulesOrErr;      
     SplitModules.insert(SplitModules.end(), NewSplitModules.begin(),
                         NewSplitModules.end());
   }
@@ -2256,10 +2278,9 @@ Expected<SmallVector<StringRef>> linkAndWrapDeviceFiles(
       SmallVector<StringRef> InputFilesSYCL;
       InputFilesSYCL.emplace_back(*TmpOutputOrErr);
       auto SplitModulesOrErr =
-          SYCLModuleSplitMode
-              ? sycl::runSYCLSplitLibrary(InputFilesSYCL, LinkerArgs,
-                                          *SYCLModuleSplitMode)
-              : sycl::runSYCLPostLinkTool(InputFilesSYCL, LinkerArgs);
+          UseSYCLPostLinkTool
+              ? sycl::runSYCLPostLinkTool(InputFilesSYCL, LinkerArgs)
+              : sycl::runSYCLPostLinkLibrary(InputFilesSYCL, LinkerArgs);
       if (!SplitModulesOrErr)
         return SplitModulesOrErr.takeError();
 
@@ -2819,7 +2840,14 @@ int main(int Argc, char **Argv) {
     timeTraceProfilerInitialize(Granularity, Argv[0]);
   }
 
+  UseSYCLPostLinkTool = Args.hasArg(OPT_use_sycl_post_link_tool);
+  if (UseSYCLPostLinkTool && Args.hasArg(OPT_no_use_sycl_post_link_tool))
+    reportError(createStringError("use-sycl-post-link-tool and no-use-sycl-post-link-tool options can't be used together."));
+
   if (Args.hasArg(OPT_sycl_module_split_mode_EQ)) {
+    if (UseSYCLPostLinkTool)
+      reportError(createStringError("-sycl-module-split-mode should be used with -no-use-sycl-post-link-tool command line option."));
+
     StringRef StrMode = Args.getLastArgValue(OPT_sycl_module_split_mode_EQ);
     SYCLModuleSplitMode = module_split::convertStringToSplitMode(StrMode);
     if (!SYCLModuleSplitMode)
@@ -2839,12 +2867,6 @@ int main(int Argc, char **Argv) {
 
     SPIRVDumpDir = Dir;
   }
-
-  if (Args.hasArg(OPT_sycl_spec_const_handling_mode_EQ) &&
-      !Args.hasArg(OPT_sycl_module_split_mode_EQ))
-    reportError(createStringError(
-        "-sycl-spec-const-handling command line option should be used in "
-        "conjunction with -sycl-module-split-mode command line option."));
 
   {
     llvm::TimeTraceScope TimeScope("Execute linker wrapper");
