@@ -22,8 +22,9 @@
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/Frontend/Offloading/OffloadWrapper.h"
-#include "llvm/Frontend/Offloading/SYCLOffloadWrapper.h"
+//#include "llvm/Frontend/Offloading/SYCLOffloadWrapper.h"
 #include "llvm/Frontend/Offloading/Utility.h"
+#include "llvm/Frontend/Offloading/PropertySet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Module.h"
@@ -132,6 +133,9 @@ static bool DryRun = false;
 
 /// Print verbose output.
 static bool Verbose = false;
+
+/// Print SYCL specific verbose output.
+static bool SYCLVerbose = false;
 
 /// Filename of the executable being created.
 static StringRef ExecutableName;
@@ -1089,35 +1093,35 @@ static Expected<StringRef> runAOTCompile(StringRef InputFile,
                            "Unsupported SYCL Triple and Arch");
 }
 
+// TODO: this should be rewritten.
 /// Reads device images from the given \p InputFile and wraps them
 /// in one LLVM IR Module as a constant data.
 ///
 /// \returns A path to the LLVM Module that contains wrapped images.
 Expected<StringRef>
-wrapSYCLBinariesFromFile(std::vector<module_split::SplitModule> &SplitModules,
-                         const ArgList &Args, bool IsEmbeddedIR) {
+wrapSYCLBinariesFromFile(ArrayRef<char> Buffer,
+                         const ArgList &Args, StringRef Annotation, bool IsEmbeddedIR) {
   auto OutputFileOrErr = createOutputFile(
       sys::path::filename(ExecutableName) + ".sycl.image.wrapper", "bc");
   if (!OutputFileOrErr)
     return OutputFileOrErr.takeError();
 
   StringRef OutputFilePath = *OutputFileOrErr;
-  if (Verbose || DryRun) {
-    std::string InputFiles;
-    SmallString<0> Msg;
-    for (size_t I = 0, E = SplitModules.size(); I != E; ++I) {
-      module_split::SplitModule &SM = SplitModules[I];
-      Msg.append(formatv(" input: {0}, compile-opts: {1}, link-opts: {2}",
-                         SM.ModuleFilePath, SM.CompileOptions, SM.LinkOptions)
-                     .sstr<128>());
-      if (I + 1 < E)
-        Msg.append(",");
-    }
+  if (SYCLVerbose || DryRun) {
+    // TODO: logic with dumping should be moved somewhere else.
+    // std::string InputFiles;
+    // SmallString<0> Msg;
+    // for (size_t I = 0, E = SplitModules.size(); I != E; ++I) {
+    //   module_split::SplitModule &SM = SplitModules[I];
+    //   Msg.append(formatv(" input: {0}, compile-opts: {1}, link-opts: {2}",
+    //                      SM.ModuleFilePath, SM.CompileOptions, SM.LinkOptions)
+    //                  .sstr<128>());
+    //   if (I + 1 < E)
+    //     Msg.append(",");
+    // }
 
     errs() << formatv(" offload-wrapper: output: {0}, {1}\n", OutputFilePath,
-                      Msg);
-    if (DryRun)
-      return OutputFilePath;
+                      Annotation);
   }
 
   StringRef Target = Args.getLastArgValue(OPT_triple_EQ);
@@ -1126,7 +1130,7 @@ wrapSYCLBinariesFromFile(std::vector<module_split::SplitModule> &SplitModules,
         inconvertibleErrorCode(),
         "can't wrap SYCL image. -triple argument is missing.");
 
-  SmallVector<llvm::offloading::SYCLImage> Images;
+  //SmallVector<llvm::offloading::SYCLImage> Images;
   // SYCL runtime currently works for spir64 target triple and not for
   // spir64-unknown-unknown/spirv64-unknown-unknown/spirv64.
   // TODO: Fix SYCL runtime to accept other triples
@@ -1134,32 +1138,34 @@ wrapSYCLBinariesFromFile(std::vector<module_split::SplitModule> &SplitModules,
   std::string EmbeddedIRTarget("llvm_");
   EmbeddedIRTarget.append(T.getArchName());
   StringRef RegularTarget(T.getArchName());
+  // TODO: logic with RegularTarget should be moved somewhere else.
   if (RegularTarget == "spirv64")
     RegularTarget = "spir64";
 
-  for (auto &SI : SplitModules) {
-    if (!OffloadImageDumpDir.empty()) {
-      StringRef CopyFrom = SI.ModuleFilePath;
-      SmallString<128> CopyTo = OffloadImageDumpDir;
-      StringRef Filename = sys::path::filename(CopyFrom);
-      CopyTo.append(Filename);
-      std::error_code EC = sys::fs::copy_file(CopyFrom, CopyTo);
-      if (EC)
-        return createStringError(EC, formatv("failed to copy file. From: "
-                                             "{0} to: {1}, error_code: {2}",
-                                             CopyFrom, CopyTo, EC.value()));
-    }
+  // TODO: logic with dumping should be somewhere else.
+  // for (auto &SI : SplitModules) {
+  //   if (!OffloadImageDumpDir.empty()) {
+  //     StringRef CopyFrom = SI.ModuleFilePath;
+  //     SmallString<128> CopyTo = OffloadImageDumpDir;
+  //     StringRef Filename = sys::path::filename(CopyFrom);
+  //     CopyTo.append(Filename);
+  //     std::error_code EC = sys::fs::copy_file(CopyFrom, CopyTo);
+  //     if (EC)
+  //       return createStringError(EC, formatv("failed to copy file. From: "
+  //                                            "{0} to: {1}, error_code: {2}",
+  //                                            CopyFrom, CopyTo, EC.value()));
+  //   }
 
-    auto MBOrDesc = MemoryBuffer::getFile(SI.ModuleFilePath);
-    if (!MBOrDesc)
-      return createFileError(SI.ModuleFilePath, MBOrDesc.getError());
+  //   auto MBOrDesc = MemoryBuffer::getFile(SI.ModuleFilePath);
+  //   if (!MBOrDesc)
+  //     return createFileError(SI.ModuleFilePath, MBOrDesc.getError());
 
-    StringRef ImageTarget =
-        IsEmbeddedIR ? StringRef(EmbeddedIRTarget) : StringRef(RegularTarget);
-    Images.emplace_back(std::move(*MBOrDesc), SI.Properties, SI.Symbols,
-                        ImageTarget, std::move(SI.CompileOptions),
-                        std::move(SI.LinkOptions));
-  }
+  //   StringRef ImageTarget =
+  //       IsEmbeddedIR ? StringRef(EmbeddedIRTarget) : StringRef(RegularTarget);
+  //   Images.emplace_back(std::move(*MBOrDesc), SI.Properties, SI.Symbols,
+  //                       ImageTarget, std::move(SI.CompileOptions),
+  //                       std::move(SI.LinkOptions));
+  // }
 
   LLVMContext C;
   Module M("offload.wrapper.object", C);
@@ -1167,8 +1173,8 @@ wrapSYCLBinariesFromFile(std::vector<module_split::SplitModule> &SplitModules,
       Args.getLastArgValue(OPT_host_triple_EQ, sys::getDefaultTargetTriple())));
 
   if (Error E = offloading::wrapSYCLBinaries(
-          M, Images, offloading::SYCLWrappingOptions(),
-          Args.hasArg(OPT_preview_breaking_changes)))
+          M, Buffer, offloading::SYCLJITOptions()))
+          // Args.hasArg(OPT_preview_breaking_changes)))
     return E;
 
   if (Args.hasArg(OPT_print_wrapped_module))
@@ -1295,12 +1301,82 @@ Error mergeSYCLBIN(ArrayRef<StringRef> Files, const ArgList &Args) {
   return Error::success();
 }
 
+static Expected<std::unique_ptr<MemoryBuffer>> prepareBuffer(const std::vector<module_split::SplitModule> &Modules, const ArgList &Args, std::string &Annotation) {
+  // TODO: recheck this name.
+  Expected<StringRef> OutputFileOrErr = createOutputFile("split_buffers_combined", "o");
+  if (!OutputFileOrErr)
+    return OutputFileOrErr.takeError();
+  
+  int FD = -1;
+  if (std::error_code EC = sys::fs::openFileForWrite(*OutputFileOrErr, FD))
+    return errorCodeToError(EC);
+
+  Annotation = "input: ";
+  raw_fd_ostream FS(FD, /*shouldClose*/ true);
+  for (size_t I = 0, E = Modules.size(); I != E; ++I) {
+    auto File = Modules[I].ModuleFilePath;
+    Annotation += File;
+    if (I + 1 != E)
+      Annotation += ',';
+
+    llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> FileOrErr =
+        llvm::MemoryBuffer::getFileOrSTDIN(File);
+    if (std::error_code EC = FileOrErr.getError()) {
+      if (DryRun)
+        FileOrErr = MemoryBuffer::getMemBuffer("");
+      else
+        return createFileError(File, EC);
+    }
+    OffloadingImage TheImage{};
+    // TODO: TheImageKind should be
+    // `IsAOTCompileNeeded ? IMG_Object : IMG_SPIRV;`
+    // For that we need to update SYCL Runtime to align with the ImageKind enum.
+    // Temporarily it is initalized to IMG_None, because in that case, SYCL
+    // Runtime has a heuristic to understand what the Image Kind is, so at least
+    // it works.
+    TheImage.TheImageKind = IMG_None;
+    TheImage.TheOffloadKind = OFK_SYCL;
+    TheImage.StringData["triple"] =
+        Args.MakeArgString(Args.getLastArgValue(OPT_triple_EQ));
+    TheImage.StringData["arch"] =
+        Args.MakeArgString(Args.getLastArgValue(OPT_arch_EQ));
+    TheImage.StringData["symbols"] = Modules[I].Symbols;
+    // TODO: recheck those options.
+    TheImage.StringData["compile-opts"] = Modules[I].CompileOptions;
+    TheImage.StringData["link-opts"] = Modules[I].LinkOptions;
+    std::string PropertiesString;
+    //util::PropertySetRegistry::write(Modules[I].Properties, raw_string_ostream(PropertiesString));
+    llvm::offloading::writePropertiesToJSON(Modules[I].Properties, raw_string_ostream(PropertiesString));
+    TheImage.StringData["properties"] = std::move(PropertiesString);
+    TheImage.Image = std::move(*FileOrErr);
+
+    llvm::SmallString<0> Buffer = OffloadBinary::write(TheImage);
+    if (Buffer.size() % OffloadBinary::getAlignment() != 0)
+      return createStringError("Offload binary has invalid size alignment");
+    FS << Buffer;
+  }
+
+  FS.close();
+  ErrorOr<std::unique_ptr<MemoryBuffer>> MBOrErr = MemoryBuffer::getFile(*OutputFileOrErr);
+  if (error_code EC = MBOrErr.getError())
+    return createFileError(*OutputFileOrErr, EC);
+
+  Annotation += formatv(", compile-opts: {0}, link-opts: {1}", Modules[0].CompileOptions, Modules[0].LinkOptions);
+  return std::move(*MBOrErr);
+}
+
 // Run wrapping library and clang
 static Expected<StringRef>
-runWrapperAndCompile(std::vector<module_split::SplitModule> &SplitModules,
+runWrapperAndCompile(const std::vector<module_split::SplitModule> &SplitModules,
                      const ArgList &Args, bool IsEmbeddedIR = false) {
-  auto OutputFile =
-      sycl::wrapSYCLBinariesFromFile(SplitModules, Args, IsEmbeddedIR);
+  std::string Annotation;
+  Expected<std::unique_ptr<MemoryBuffer>> MBOrErr = prepareBuffer(SplitModules, Args, Annotation);
+  if (!MBOrErr)
+    return MBOrErr.takeError();
+
+  std::unique_ptr<MemoryBuffer> MB = std::move(*MBOrErr);
+  Expected<StringRef> OutputFile =
+      sycl::wrapSYCLBinariesFromFile(ArrayRef<char>(MB->getBufferStart(), MB->getBufferEnd()), Args, Annotation, IsEmbeddedIR);
   if (!OutputFile)
     return OutputFile.takeError();
   // call to clang
@@ -2668,6 +2744,7 @@ int main(int Argc, char **Argv) {
   cl::ParseCommandLineOptions(NewArgv.size(), &NewArgv[0]);
 
   Verbose = Args.hasArg(OPT_verbose);
+  SYCLVerbose = Args.hasArg(OPT_sycl_verbose);
   DryRun = Args.hasArg(OPT_dry_run);
   SaveTemps = Args.hasArg(OPT_save_temps);
   CudaBinaryPath = Args.getLastArgValue(OPT_cuda_path_EQ).str();

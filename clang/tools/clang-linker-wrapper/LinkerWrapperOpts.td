@@ -41,6 +41,8 @@ def dry_run : Flag<["--"], "dry-run">,
   HelpText<"Print program arguments without running">;
 def verbose : Flag<["--"], "wrapper-verbose">,
   Flags<[WrapperOnlyOption]>, HelpText<"Verbose output from tools">;
+def sycl_verbose : Flag<["--"], "sycl-wrapper-verbose">,
+  Flags<[WrapperOnlyOption]>, HelpText<"SYCL specific verbose output for inspecting the pipeline">;
 def embed_bitcode : Flag<["--"], "embed-bitcode">,
                     Flags<[WrapperOnlyOption]>,
                     HelpText<"Embed linked bitcode in the module">;

@@ -40,7 +40,8 @@ static cl::opt<object::OffloadKind> Kind(
     cl::Required,
     cl::values(clEnumValN(object::OFK_OpenMP, "openmp", "Wrap OpenMP binaries"),
                clEnumValN(object::OFK_Cuda, "cuda", "Wrap CUDA binaries"),
-               clEnumValN(object::OFK_HIP, "hip", "Wrap HIP binaries")));
+               clEnumValN(object::OFK_HIP, "hip", "Wrap HIP binaries")),
+               clEnumValN(object::OFK_SYCL, "sycl", "Wrap SYCL binaries"));
 
 static cl::opt<std::string> OutputFile("o", cl::desc("Write output to <file>."),
                                        cl::value_desc("file"),
@@ -121,6 +122,7 @@ int main(int argc, char **argv) {
 
   SmallVector<std::unique_ptr<MemoryBuffer>> Buffers;
   SmallVector<ArrayRef<char>> BuffersToWrap;
+  SmallVector<SYCLImage> SYCLImages;
   for (StringRef Input : InputFiles) {
     ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
         MemoryBuffer::getFileOrSTDIN(Input);
@@ -128,6 +130,8 @@ int main(int argc, char **argv) {
       ReportError(createFileError(Input, EC));
     std::unique_ptr<MemoryBuffer> &Buffer =
         Buffers.emplace_back(std::move(*BufferOrErr));
+    if (Kind == object::OFK_SYCL)
+      SYCLImages.push_back();
     BuffersToWrap.emplace_back(
         ArrayRef<char>(Buffer->getBufferStart(), Buffer->getBufferSize()));
   }

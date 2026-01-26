@@ -22,8 +22,9 @@ class MemoryBufferRef;
 
 namespace offloading {
 
-using ByteArray = SmallVector<unsigned char, 0>;
-using PropertyValue = std::variant<uint32_t, ByteArray>;
+//using ByteArray = SmallVector<unsigned char, 0>;
+using ByteArray = SmallVector<char, 0>;
+using PropertyValue = std::variant<uint32_t, ByteArray>; // TODO: add constants for get_index.
 using PropertySet = std::map<std::string, PropertyValue>;
 using PropertySetRegistry = std::map<std::string, PropertySet>;
 

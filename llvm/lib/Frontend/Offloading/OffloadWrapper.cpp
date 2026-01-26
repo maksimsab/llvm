@@ -13,6 +13,9 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Frontend/Offloading/Utility.h"
+#include "llvm/Frontend/Offloading/PropertySet.h"
+//#include "llvm/Support/PropertySetIO.h"
+#include "llvm/SYCLLowerIR/UtilsSYCLNativeCPU.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -27,7 +30,9 @@
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include "llvm/Support/FormatVariadic.h"
 
+#include <variant>
 #include <memory>
 #include <utility>
 
@@ -644,6 +649,8 @@ class SYCLWrapper {
 public:
   SYCLWrapper(Module &M, const SYCLJITOptions &Options)
       : M(M), C(M.getContext()), Options(Options) {
+    SyclPropTy = getSyclPropTy();
+    SyclPropSetTy = getSyclPropSetTy();
     EntryTy = offloading::getEntryTy(M);
     SyclDeviceImageTy = getSyclDeviceImageTy();
     SyclBinDescTy = getSyclBinDescTy();
@@ -700,13 +707,17 @@ public:
   /// \endcode
   ///
   /// \returns Global variable that represents FatbinDesc.
-  GlobalVariable *createFatbinDesc(ArrayRef<OffloadFile> OffloadFiles) {
+  Expected<GlobalVariable *> createFatbinDesc(ArrayRef<OffloadFile> OffloadFiles) {
     StringRef OffloadKindTag = ".sycl_offloading.";
     SmallVector<Constant *> WrappedImages;
     WrappedImages.reserve(OffloadFiles.size());
-    for (size_t I = 0, E = OffloadFiles.size(); I != E; ++I)
-      WrappedImages.push_back(
-          wrapImage(*OffloadFiles[I].getBinary(), Twine(I), OffloadKindTag));
+    for (size_t I = 0, E = OffloadFiles.size(); I != E; ++I) {
+      Expected<Constant *> ImageOrErr = wrapImage(*OffloadFiles[I].getBinary(), Twine(I), OffloadKindTag);
+      if (!ImageOrErr)
+        return ImageOrErr.takeError();
+  
+      WrappedImages.push_back(*ImageOrErr);
+    }
 
     return combineWrappedImages(WrappedImages, OffloadKindTag);
   }
@@ -757,7 +768,81 @@ public:
     appendToGlobalDtors(M, Func, /*Priority*/ 1);
   }
 
+  void createSyclRegisterWithAtexitUnregister(GlobalVariable *FatbinDesc) {
+    auto *UnregFuncTy =
+        FunctionType::get(Type::getVoidTy(C), /*isVarArg*/ false);
+    auto *UnregFunc =
+        Function::Create(UnregFuncTy, GlobalValue::InternalLinkage,
+                         "sycl.descriptor_unreg.atexit", &M);
+    UnregFunc->setSection(".text.startup");
+
+    // Declaration for __sycl_unregister_lib(void*).
+    auto *UnregTargetTy =
+        FunctionType::get(Type::getVoidTy(C), PointerType::getUnqual(C), false);
+    FunctionCallee UnregTargetC =
+        M.getOrInsertFunction("__sycl_unregister_lib", UnregTargetTy);
+
+    // Body of the unregister wrapper.
+    IRBuilder<> UnregBuilder(BasicBlock::Create(C, "entry", UnregFunc));
+    UnregBuilder.CreateCall(UnregTargetC, FatbinDesc);
+    UnregBuilder.CreateRetVoid();
+
+    auto *RegFuncTy = FunctionType::get(Type::getVoidTy(C), /*isVarArg*/ false);
+    auto *RegFunc = Function::Create(RegFuncTy, GlobalValue::InternalLinkage,
+                                     "sycl.descriptor_reg", &M);
+    RegFunc->setSection(".text.startup");
+
+    auto *RegTargetTy =
+        FunctionType::get(Type::getVoidTy(C), PointerType::getUnqual(C), false);
+    FunctionCallee RegTargetC =
+        M.getOrInsertFunction("__sycl_register_lib", RegTargetTy);
+
+    // `atexit` takes a `void(*)()` function pointer arg and returns an i32.
+    FunctionType *AtExitTy = FunctionType::get(
+        Type::getInt32Ty(C), PointerType::getUnqual(C), false);
+    FunctionCallee AtExitC = M.getOrInsertFunction("atexit", AtExitTy);
+
+    IRBuilder<> RegBuilder(BasicBlock::Create(C, "entry", RegFunc));
+    RegBuilder.CreateCall(RegTargetC, FatbinDesc);
+    RegBuilder.CreateCall(AtExitC, UnregFunc);
+    RegBuilder.CreateRetVoid();
+
+    // Finally, add to global constructors.
+    appendToGlobalCtors(M, RegFunc, /*Priority*/ 1);
+  }
+
 private:
+  /// Creates structure corresponding to:
+  /// \code
+  ///  struct _pi_device_binary_property_struct {
+  ///    char *Name;
+  ///    void *ValAddr;
+  ///    uint32_t Type;
+  ///    uint64_t ValSize;
+  ///  };
+  /// \endcode
+  StructType *getSyclPropTy() {
+    return StructType::create({PointerType::getUnqual(C),
+                               PointerType::getUnqual(C), Type::getInt32Ty(C),
+                               Type::getInt64Ty(C)},
+                              "_pi_device_binary_property_struct");
+  }
+
+  /// Creates a structure corresponding to:
+  /// \code
+  ///  struct _pi_device_binary_property_set_struct {
+  ///    char *Name;
+  ///    _pi_device_binary_property_struct* PropertiesBegin;
+  ///    _pi_device_binary_property_struct* PropertiesEnd;
+  ///  };
+  /// \endcode
+  StructType *getSyclPropSetTy() {
+    return StructType::create({PointerType::getUnqual(C),
+                               PointerType::getUnqual(C),
+                               PointerType::getUnqual(C)},
+                              "_pi_device_binary_property_set_struct");
+  }
+
   IntegerType *getSizeTTy() {
     switch (M.getDataLayout().getPointerSize()) {
     case 4:
@@ -804,8 +889,8 @@ private:
   ///   // The entry table.
   ///   __tgt_offload_entry *EntriesBegin;
   ///   __tgt_offload_entry *EntriesEnd;
-  ///   const char *PropertiesBegin;
-  ///   const char *PropertiesEnd;
+  ///   _pi_device_binary_property_set_struct *PropertySetBegin;
+  ///   _pi_device_binary_property_set_struct *PropertySetEnd;
   /// };
   /// \endcode
   StructType *getSyclDeviceImageTy() {
@@ -821,8 +906,8 @@ private:
             PointerType::getUnqual(C), // ImageEnd
             PointerType::getUnqual(C), // EntriesBegin
             PointerType::getUnqual(C), // EntriesEnd
-            PointerType::getUnqual(C), // PropertiesBegin
-            PointerType::getUnqual(C)  // PropertiesEnd
+            PointerType::getUnqual(C), // PropertySetBegin
+            PointerType::getUnqual(C)  // PropertySetEnd
         },
         "__sycl.tgt_device_image");
   }
@@ -849,6 +934,69 @@ private:
          PointerType::getUnqual(C), PointerType::getUnqual(C)},
         "__sycl.tgt_bin_desc");
   }
+
+  Function *addDeclarationForNativeCPU(StringRef Name) {
+    FunctionType *NativeCPUFuncTy = FunctionType::get(
+        Type::getVoidTy(C),
+        {PointerType::getUnqual(C), PointerType::getUnqual(C)}, false);
+    FunctionType *NativeCPUBuiltinTy = FunctionType::get(
+        PointerType::getUnqual(C), {PointerType::getUnqual(C)}, false);
+    FunctionType *FTy;
+    if (Name.starts_with("__dpcpp_nativecpu"))
+      FTy = NativeCPUBuiltinTy;
+    else
+      FTy = NativeCPUFuncTy;
+    auto FCalle = M.getOrInsertFunction(
+        sycl::utils::addSYCLNativeCPUSuffix(Name).str(), FTy);
+    Function *F = dyn_cast<Function>(FCalle.getCallee());
+    if (F == nullptr)
+      report_fatal_error("Unexpected callee");
+    return F;
+  }
+
+  std::pair<Constant *, Constant *>
+  addDeclarationsForNativeCPU(std::string Entries) {
+    auto *NullPtr = llvm::ConstantPointerNull::get(PointerType::getUnqual(C));
+    if (Entries.empty())
+      return {NullPtr, NullPtr};
+
+    std::unique_ptr<MemoryBuffer> MB = MemoryBuffer::getMemBuffer(Entries);
+    // the Native CPU PI Plug-in expects the BinaryStart field to point to an
+    // array of struct nativecpu_entry {
+    //   char *kernelname;
+    //   unsigned char *kernel_ptr;
+    // };
+    StructType *NCPUEntryT = StructType::create(
+        {PointerType::getUnqual(C), PointerType::getUnqual(C)},
+        "__nativecpu_entry");
+    SmallVector<Constant *, 5> NativeCPUEntries;
+    for (line_iterator LI(*MB); !LI.is_at_eof(); ++LI) {
+      auto *NewDecl = addDeclarationForNativeCPU(*LI);
+      NativeCPUEntries.push_back(ConstantStruct::get(
+          NCPUEntryT,
+          {addStringToModule(*LI, "__ncpu_function_name"), NewDecl}));
+    }
+
+    // Add an empty entry that we use as end iterator
+    auto *NativeCPUEndStr =
+        addStringToModule("__nativecpu_end", "__ncpu_end_str");
+    NativeCPUEntries.push_back(
+        ConstantStruct::get(NCPUEntryT, {NativeCPUEndStr, NullPtr}));
+
+    // Create the constant array containing the {kernel name, function pointers}
+    // pairs
+    ArrayType *ATy = ArrayType::get(NCPUEntryT, NativeCPUEntries.size());
+    Constant *CA = ConstantArray::get(ATy, NativeCPUEntries);
+    auto *GVar = new GlobalVariable(M, CA->getType(), true,
+                                    GlobalVariable::InternalLinkage, CA,
+                                    "__sycl_native_cpu_decls");
+    auto *Begin = ConstantExpr::getGetElementPtr(GVar->getValueType(), GVar,
+                                                 getSizetConstPair(0, 0));
+    auto *End = ConstantExpr::getGetElementPtr(
+        GVar->getValueType(), GVar,
+        getSizetConstPair(0, NativeCPUEntries.size()));
+    return std::make_pair(Begin, End);
+  }  
 
   /// Adds a global readonly variable that is initialized by given
   /// \p Initializer to the module.
@@ -908,6 +1056,126 @@ private:
     return ConstantExpr::getGetElementPtr(Var->getValueType(), Var, ZeroZero);
   }
 
+  /// Creates a global variable of array of structs and initializes
+  /// it with the given values in \p ArrayData.
+  ///
+  /// \returns Pair of Constants that point at array content.
+  /// If \p ArrayData is empty then a returned pair contains nullptrs.
+  std::pair<Constant *, Constant *>
+  addStructArrayToModule(ArrayRef<Constant *> ArrayData, Type *ElemTy) {
+    if (ArrayData.empty()) {
+      auto *PtrTy = llvm::PointerType::getUnqual(ElemTy->getContext());
+      auto *NullPtr = Constant::getNullValue(PtrTy);
+      return std::make_pair(NullPtr, NullPtr);
+    }
+
+    assert(ElemTy == ArrayData[0]->getType() && "elem type mismatch");
+    auto *Arr =
+        ConstantArray::get(ArrayType::get(ElemTy, ArrayData.size()), ArrayData);
+    auto *ArrGlob = new GlobalVariable(M, Arr->getType(), /*isConstant*/ true,
+                                       GlobalVariable::InternalLinkage, Arr,
+                                       "__sycl_offload_prop_sets_arr");
+    auto *ArrB = ConstantExpr::getGetElementPtr(
+        ArrGlob->getValueType(), ArrGlob, getSizetConstPair(0, 0));
+    auto *ArrE =
+        ConstantExpr::getGetElementPtr(ArrGlob->getValueType(), ArrGlob,
+                                       getSizetConstPair(0, ArrayData.size()));
+    return std::pair<Constant *, Constant *>(ArrB, ArrE);
+  }
+
+  /// Creates a global variable that is initialized with the \p PropSet.
+  ///
+  /// \returns Pair of Constants that point at properties content.
+  std::pair<Constant *, Constant *>
+  addPropertySetToModule(const PropertySet &PropSet) {
+    SmallVector<Constant *> PropInits;
+    for (const auto &Prop : PropSet) {
+      Constant *PropName = addStringToModule(Prop.first, "prop");
+      Constant *PropValAddr = nullptr;
+      Constant *PropType =
+          ConstantInt::get(Type::getInt32Ty(C), Prop.second.index());
+      Constant *PropValSize = nullptr;
+
+      switch (Prop.second.index()) {
+      case 0: {
+        // for known scalar types ValAddr is null, ValSize keeps the value
+        PropValAddr = Constant::getNullValue(PointerType::getUnqual(C));
+        PropValSize =
+            ConstantInt::get(Type::getInt64Ty(C), std::get<uint32_t>(Prop.second));
+        break;
+      }
+      case 1: {
+        const ByteArray &Arr = std::get<ByteArray>(Prop.second);
+        PropValSize = ConstantInt::get(Type::getInt64Ty(C), Arr.size());
+        PropValAddr = addRawDataToModule(ArrayRef<char>(Arr.begin(), Arr.size()), "prop_val");
+        break;
+      }
+      default:
+        llvm_unreachable_internal("unsupported property");
+      }
+      PropInits.push_back(ConstantStruct::get(SyclPropTy, PropName, PropValAddr,
+                                              PropType, PropValSize));
+    }
+    return addStructArrayToModule(PropInits, SyclPropTy);
+  }
+
+  /// Creates a global variable that holds encoded given \p PropRegistry.
+  /// In-object representation is demonstated below.
+  ///
+  /// column is a contiguous area of the wrapper object file;
+  /// relative location of columns can be arbitrary
+  ///
+  /// \code
+  ///                             _pi_device_binary_property_struct
+  /// _pi_device_binary_property_set_struct   |
+  ///                     |                   |
+  ///                     v                   v
+  /// ...             # ...                # ...
+  /// PropSetsBegin--># Name0        +----># Name_00
+  /// PropSetsEnd--+  # PropsBegin0--+     # ValAddr_00
+  /// ...          |  # PropseEnd0------+  # Type_00
+  ///              |  # Name1           |  # ValSize_00
+  ///              |  # PropsBegin1---+ |  # ...
+  ///              |  # PropseEnd1--+ | |  # Name_0n
+  ///              +-># ...         | | |  # ValAddr_0n
+  ///                 #             | | |  # Type_0n
+  ///                 #             | | |  # ValSize_0n
+  ///                 #             | | +-># ...
+  ///                 #             | |    # ...
+  ///                 #             | +---># Name_10
+  ///                 #             |      # ValAddr_10
+  ///                 #             |      # Type_10
+  ///                 #             |      # ValSize_10
+  ///                 #             |      # ...
+  ///                 #             |      # Name_1m
+  ///                 #             |      # ValAddr_1m
+  ///                 #             |      # Type_1m
+  ///                 #             |      # ValSize_1m
+  ///                 #             +-----># ...
+  ///                 #                    #
+  /// \endcode
+  ///
+  /// \returns Pair of pointers to the beginning and end of the property set
+  /// array, or a pair of nullptrs in case the properties file wasn't specified.
+  std::pair<Constant *, Constant *>
+  addPropertySetRegistry(const PropertySetRegistry &PropRegistry) {
+    // transform all property sets to IR and get the middle column image into
+    // the PropSetsInits
+    SmallVector<Constant *> PropSetsInits;
+    for (const auto &PropSet : PropRegistry) {
+      // create content in the rightmost column and get begin/end pointers
+      std::pair<Constant *, Constant *> Props =
+          addPropertySetToModule(PropSet.second);
+      // get the next the middle column element
+      auto *Category = addStringToModule(PropSet.first, "SYCL_PropSetName");
+      PropSetsInits.push_back(ConstantStruct::get(SyclPropSetTy, Category,
+                                                  Props.first, Props.second));
+    }
+    // now get content for the leftmost column - create the top-level
+    // PropertySetsBegin/PropertySetsBegin entries and return pointers to them
+    return addStructArrayToModule(PropSetsInits, SyclPropSetTy);
+  }
+
   /// Each image contains its own set of symbols, which may contain different
   /// symbols than other images. This function constructs an array of
   /// symbol entries for a particular image.
@@ -941,7 +1209,29 @@ private:
     return std::make_pair(EntriesB, EntriesE);
   }
 
-  Constant *wrapImage(const OffloadBinary &OB, const Twine &ImageID,
+  /// Emits a global array that contains \p Address and \P Size. Also add
+  /// it into llvm.used to force it to be emitted in the object file.
+  void emitRegistrationFunctions(Constant *Address, size_t Size, Twine ImageID,
+                                 StringRef OffloadKindTag) {
+    Type *IntPtrTy = M.getDataLayout().getIntPtrType(C);
+    auto *ImgInfoArr =
+        ConstantArray::get(ArrayType::get(IntPtrTy, 2),
+                           {ConstantExpr::getPointerCast(Address, IntPtrTy),
+                            ConstantInt::get(IntPtrTy, Size)});
+    auto *ImgInfoVar = new GlobalVariable(
+        M, ImgInfoArr->getType(), true, GlobalVariable::InternalLinkage,
+        ImgInfoArr, Twine(OffloadKindTag) + ImageID + ".info");
+    ImgInfoVar->setAlignment(
+        MaybeAlign(M.getDataLayout().getTypeStoreSize(IntPtrTy) * 2u));
+    ImgInfoVar->setUnnamedAddr(GlobalValue::UnnamedAddr::Local);
+    ImgInfoVar->setSection(".tgtimg");
+
+    // Add image info to the used list to force it to be emitted to the
+    // object.
+    appendToUsed(M, ImgInfoVar);
+  }
+
+  Expected<Constant *> wrapImage(const OffloadBinary &OB, const Twine &ImageID,
                       StringRef OffloadKindTag) {
     // Note: Intel DPC++ compiler had 2 versions of this structure
     // and clang++ has a third different structure. To avoid ABI incompatibility
@@ -963,9 +1253,18 @@ private:
         Options.LinkOptions, Twine(OffloadKindTag) + "opts.link." + ImageID);
 
     // Note: NULL for now.
-    std::pair<Constant *, Constant *> PropertiesConstants = {
-        Constant::getNullValue(PointerType::getUnqual(C)),
-        Constant::getNullValue(PointerType::getUnqual(C))};
+    //std::pair<Constant *, Constant *> PropertiesConstants = {
+    //    Constant::getNullValue(PointerType::getUnqual(C)),
+    //    Constant::getNullValue(PointerType::getUnqual(C))};
+    //util::PropertySetRegistry::read(OB.getString("properties"));
+    StringRef PropertiesStr = OB.getString("properties");
+    if (PropertiesStr.empty())
+      PropertiesStr = "{}"; // Empty JSON
+
+    Expected<PropertySetRegistry> PropertiesOrErr = readPropertiesFromJSON(MemoryBufferRef(PropertiesStr, /*Identifier*/ ""));
+    if (!PropertiesOrErr)
+      return joinErrors(createStringError(formatv("failed to parse SYCL properties. content: {0}, ", OB.getString("properties"))), std::move(PropertiesOrErr.takeError()));
+    std::pair<Constant *, Constant *> PropertiesConstants = addPropertySetRegistry(*PropertiesOrErr);
 
     StringRef RawImage = OB.getImage();
     std::pair<Constant *, Constant *> Binary = addArrayToModule(
@@ -983,6 +1282,11 @@ private:
         TripleConstant, CompileOptions, LinkOptions, Binary.first,
         Binary.second, ImageEntriesPtrs.first, ImageEntriesPtrs.second,
         PropertiesConstants.first, PropertiesConstants.second);
+
+    // TODO: check that statement.
+    if (true /*|| Options.EmitRegistrationFunctions*/)
+      emitRegistrationFunctions(Binary.first, RawImage.size(),
+                                ImageID, OffloadKindTag);
 
     return WrappedBinary;
   }
@@ -1020,6 +1324,8 @@ private:
   LLVMContext &C;
   SYCLJITOptions Options;
 
+  StructType *SyclPropTy = nullptr;
+  StructType *SyclPropSetTy = nullptr;
   StructType *EntryTy = nullptr;
   StructType *SyclDeviceImageTy = nullptr;
   StructType *SyclBinDescTy = nullptr;
@@ -1075,12 +1381,15 @@ Error llvm::offloading::wrapSYCLBinaries(llvm::Module &M, ArrayRef<char> Buffer,
   if (Error E = extractOffloadBinaries(MBR, OffloadFiles))
     return E;
 
-  GlobalVariable *Desc = W.createFatbinDesc(OffloadFiles);
-  if (!Desc)
-    return createStringError(inconvertibleErrorCode(),
-                             "No binary descriptors created.");
+  Expected<GlobalVariable *> DescOrErr = W.createFatbinDesc(OffloadFiles);
+  if (!DescOrErr)
+    return joinErrors(createStringError("failed to wrap SYCL Binaries: "), std::move(DescOrErr.takeError()));
 
-  W.createRegisterFatbinFunction(Desc);
-  W.createUnregisterFunction(Desc);
+  if (Triple(M.getTargetTriple()).isOSWindows()) {
+    W.createSyclRegisterWithAtexitUnregister(*DescOrErr);
+  } else {
+    W.createRegisterFatbinFunction(*DescOrErr);
+    W.createUnregisterFunction(*DescOrErr);
+  }
   return Error::success();
 }
