@@ -33,6 +33,7 @@
 #include "llvm/SYCLLowerIR/SanitizerPostOptimizer.h"
 #include "llvm/SYCLLowerIR/SpecConstants.h"
 #include "llvm/SYCLPostLink/ComputeModuleRuntimeInfo.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
@@ -1254,11 +1255,11 @@ Expected<std::vector<SplitModule>> parseSplitModulesFromFile(StringRef File) {
       return createFileError(PropertyFilePath, MBOrErr.getError());
 
     auto &MB = **MBOrErr;
-    auto PropSetOrErr = llvm::util::PropertySetRegistry::read(&MB);
+    auto PropSetOrErr = llvm::offloading::readPropertiesFromJSON(MB);
     if (!PropSetOrErr)
       return PropSetOrErr.takeError();
 
-    llvm::util::PropertySetRegistry Properties = std::move(**PropSetOrErr);
+    llvm::offloading::PropertySetRegistry Properties = std::move(*PropSetOrErr);
     MBOrErr = MemoryBuffer::getFile(SymbolsFilePath);
     if (!MBOrErr)
       return createFileError(SymbolsFilePath, MBOrErr.getError());

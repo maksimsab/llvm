@@ -9,6 +9,9 @@
 /// provides helper functions to translate PropertySetRegistry from/to JSON.
 //===----------------------------------------------------------------------===//
 
+#ifndef LLVM_FRONTEND_OFFLOADING_PROPERTY_SET_H
+#define LLVM_FRONTEND_OFFLOADING_PROPERTY_SET_H
+
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
@@ -22,7 +25,10 @@ class MemoryBufferRef;
 
 namespace offloading {
 
-using ByteArray = SmallVector<unsigned char, 0>;
+using ByteArray = SmallVector<char, 0>;
+
+constexpr int PROPERTY_VALUE_INTEGER_TYPE_INDEX = 0;
+constexpr int PROPERT_VALUE_BYTE_ARRAY_INDEX = 1;
 using PropertyValue = std::variant<uint32_t, ByteArray>;
 using PropertySet = std::map<std::string, PropertyValue>;
 using PropertySetRegistry = std::map<std::string, PropertySet>;
@@ -34,3 +40,5 @@ readPropertiesFromJSON(MemoryBufferRef Buf);
 
 } // namespace offloading
 } // namespace llvm
+
+#endif // LLVM_FRONTEND_OFFLOADING_PROPERTY_SET_H

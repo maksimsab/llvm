@@ -13,6 +13,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Frontend/Offloading/PropertySet.h"
 #include "llvm/Support/PropertySetIO.h"
 
 #include <string>
@@ -38,7 +39,7 @@ struct SYCLImage {
   SYCLImage &operator=(SYCLImage &&) = default;
 
   SYCLImage(std::unique_ptr<llvm::MemoryBuffer> Image,
-            const llvm::util::PropertySetRegistry &Registry,
+            const llvm::offloading::PropertySetRegistry &Registry,
             llvm::StringRef Entries, llvm::StringRef Target = "",
             llvm::StringRef CompileOptions = "",
             llvm::StringRef LinkOptions = "")
@@ -48,7 +49,7 @@ struct SYCLImage {
         LinkOptions(LinkOptions) {}
 
   std::unique_ptr<llvm::MemoryBuffer> Image;
-  llvm::util::PropertySetRegistry PropertyRegistry;
+  llvm::offloading::PropertySetRegistry PropertyRegistry;
 
   std::string Entries;
 

@@ -783,7 +783,7 @@ runSYCLPostLinkTool(ArrayRef<StringRef> InputFiles, const ArgList &Args,
       return ImageFileOrErr.takeError();
 
     std::vector Modules = {module_split::SplitModule(
-        *ImageFileOrErr, util::PropertySetRegistry())};
+        *ImageFileOrErr, llvm::offloading::PropertySetRegistry())};
     return Modules;
   }
 
@@ -812,7 +812,7 @@ runSYCLSplitLibrary(ArrayRef<StringRef> InputFiles, const ArgList &Args,
     auto InputFilesStr = llvm::join(InputFiles.begin(), InputFiles.end(), ",");
     errs() << formatv("sycl-module-split: input: {0}, output: {1}\n",
                       InputFilesStr, OutputFilePath);
-    SplitModules.emplace_back(OutputFilePath, util::PropertySetRegistry());
+    SplitModules.emplace_back(OutputFilePath, llvm::offloading::PropertySetRegistry());
     return SplitModules;
   }
 

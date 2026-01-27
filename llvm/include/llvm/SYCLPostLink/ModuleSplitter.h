@@ -20,7 +20,7 @@
 #include "llvm/SYCLLowerIR/SYCLDeviceRequirements.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
-#include "llvm/Support/PropertySetIO.h"
+#include "llvm/Frontend/Offloading/PropertySet.h"
 
 #include <array>
 #include <memory>
@@ -318,7 +318,7 @@ LLVM_DUMP_METHOD void dumpEntryPoints(const Module &M,
 
 struct SplitModule {
   std::string ModuleFilePath;
-  util::PropertySetRegistry Properties;
+  llvm::offloading::PropertySetRegistry Properties;
   std::string Symbols;
   std::string CompileOptions;
   std::string LinkOptions;
@@ -329,7 +329,7 @@ struct SplitModule {
   SplitModule(SplitModule &&) = default;
   SplitModule &operator=(SplitModule &&) = default;
 
-  SplitModule(std::string_view File, util::PropertySetRegistry Properties,
+  SplitModule(std::string_view File, llvm::offloading::PropertySetRegistry Properties,
               std::string Symbols = "", std::string CompileOptions = "",
               std::string LinkOptions = "")
       : ModuleFilePath(File), Properties(std::move(Properties)),

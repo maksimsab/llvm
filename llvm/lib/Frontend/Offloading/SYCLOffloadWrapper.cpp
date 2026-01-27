@@ -21,6 +21,7 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Frontend/Offloading/Utility.h"
+#include "llvm/Frontend/Offloading/PropertySet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -33,7 +34,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/LineIterator.h"
-#include "llvm/Support/PropertySetIO.h"
+//#include "llvm/Support/PropertySetIO.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <memory>
@@ -42,7 +43,6 @@
 
 using namespace llvm;
 using namespace llvm::offloading;
-using namespace llvm::util;
 
 namespace {
 
@@ -429,28 +429,43 @@ struct Wrapper {
       Constant *PropName = addStringToModule(Prop.first, "prop");
       Constant *PropValAddr = nullptr;
       Constant *PropType =
-          ConstantInt::get(Type::getInt32Ty(C), Prop.second.getType());
+          ConstantInt::get(Type::getInt32Ty(C), Prop.second.index());
       Constant *PropValSize = nullptr;
 
-      switch (Prop.second.getType()) {
-      case llvm::util::PropertyValue::UINT32: {
-        // for known scalar types ValAddr is null, ValSize keeps the value
-        PropValAddr = Constant::getNullValue(PointerType::getUnqual(C));
-        PropValSize =
-            ConstantInt::get(Type::getInt64Ty(C), Prop.second.asUint32());
-        break;
-      }
-      case llvm::util::PropertyValue::BYTE_ARRAY: {
-        const char *Ptr =
-            reinterpret_cast<const char *>(Prop.second.asRawByteArray());
-        uint64_t Size = Prop.second.getRawByteArraySize();
-        PropValSize = ConstantInt::get(Type::getInt64Ty(C), Size);
-        PropValAddr = addRawDataToModule(ArrayRef<char>(Ptr, Size), "prop_val");
-        break;
-      }
-      default:
-        llvm_unreachable_internal("unsupported property");
-      }
+      std::visit(
+        [&PropValAddr, &PropValSize, this](auto &&PropertyValue) {
+          using T = std::decay_t<decltype(PropertyValue)>;
+          if constexpr (std::is_same_v<T, uint32_t>) {
+            // for known scalar types ValAddr is null, ValSize keeps the value
+            PropValAddr = Constant::getNullValue(PointerType::getUnqual(C));
+            PropValSize =
+                ConstantInt::get(Type::getInt64Ty(C), PropertyValue);
+          } else if constexpr (std::is_same_v<T, ByteArray>)
+            PropValAddr = addRawDataToModule(ArrayRef<char>(reinterpret_cast<const char *>(PropertyValue.begin()), PropertyValue.size()), "prop_val");
+          else 
+            llvm_unreachable_internal("unsupported property");
+       }, Prop.second);
+
+      // switch (Prop.second.index()) {
+      // case llvm::offloading::PROPERTY_VALUE_INTEGER_TYPE_INDEX: {
+      //   // for known scalar types ValAddr is null, ValSize keeps the value
+      //   PropValAddr = Constant::getNullValue(PointerType::getUnqual(C));
+      //   PropValSize =
+      //       ConstantInt::get(Type::getInt64Ty(C), Prop.second.get<uint32_t>());
+      //   break;
+      // }
+      // case llvm::offloading::PROPERT_VALUE_BYTE_ARRAY_INDEX: {
+      //   const char *Ptr =
+      //       reinterpret_cast<const char *>(Prop.second.get<>());
+      //   uint64_t Size = Prop.second.getRawByteArraySize();
+      //   PropValSize = ConstantInt::get(Type::getInt64Ty(C), Size);
+      //   PropValAddr = addRawDataToModule(ArrayRef<char>(Ptr, Size), "prop_val");
+      //   break;
+      // }
+      // default:
+      //   llvm_unreachable_internal("unsupported property");
+      // }
+
       PropInits.push_back(ConstantStruct::get(SyclPropTy, PropName, PropValAddr,
                                               PropType, PropValSize));
     }

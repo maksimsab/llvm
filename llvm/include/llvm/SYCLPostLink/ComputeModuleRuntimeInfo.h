@@ -11,7 +11,7 @@
 #pragma once
 
 #include "llvm/ADT/SetVector.h"
-#include "llvm/Support/PropertySetIO.h"
+#include "llvm/Frontend/Offloading/PropertySet.h"
 #include <string>
 namespace llvm {
 
@@ -31,7 +31,7 @@ struct GlobalBinImageProps {
 bool isModuleUsingAsan(const Module &M);
 bool isModuleUsingMsan(const Module &M);
 bool isModuleUsingTsan(const Module &M);
-using PropSetRegTy = llvm::util::PropertySetRegistry;
+using PropSetRegTy = llvm::offloading::PropertySetRegistry;
 using EntryPointSet = SetVector<Function *>;
 
 PropSetRegTy computeDeviceLibProperties(const Module &M,
