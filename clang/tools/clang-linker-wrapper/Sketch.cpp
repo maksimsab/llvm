@@ -1972,13 +1972,36 @@ Expected<std::vector<module_split::SplitModule>> runSYCLOffloadingPipeline(
     ArrayRef<StringRef> InputModules, const ArgList &LinkerArgs,
     const std::pair<std::string, std::string> &CompileLinkOptions,
     function_ref<void(StringRef)> WrappedOutputCallback) {
-  Expected<StringRef> LinkedModuleOrErr =
-      sycl::linkDevice(InputModules, LinkerArgs);
-  if (!LinkedModuleOrErr)
-    return LinkedModuleOrErr.takeError();
+  // Note: pipeline can skip linking due to -fno-sycl-rdc option.
+  // In that case, we apply sycl processing to several modules.
+  std::vector<StringRef> Modules;
+  if (LinkerArgs.hasArg(OPT_no_sycl_rdc)) {
+    // No need to perform any linking.
+    Modules = std::vector(InputModules.begin(), InputModules.end());
+  } else {
+    Expected<StringRef> OutputOrErr =
+        sycl::linkDevice(InputModules, LinkerArgs);
+    if (!OutputOrErr)
+      return OutputOrErr.takeError();
 
-  return postLinkProcessModule(*LinkedModuleOrErr, LinkerArgs,
-                               CompileLinkOptions, WrappedOutputCallback);
+    Modules.push_back(*OutputOrErr);
+  }
+
+  std::vector<module_split::SplitModule> OutputModules;
+  for (StringRef Module : Modules) {
+    // Note: sycl-post-link can produce more modules than incoming due to module
+    // split.
+    Expected<std::vector<module_split::SplitModule>> ModulesOrErr =
+        postLinkProcessModule(Module, LinkerArgs, CompileLinkOptions,
+                              WrappedOutputCallback);
+    if (!ModulesOrErr)
+      return ModulesOrErr.takeError();
+
+    for (module_split::SplitModule &M : *ModulesOrErr)
+      OutputModules.push_back(std::move(M));
+  }
+
+  return OutputModules;
 }
 
 } // namespace sycl
@@ -2421,114 +2444,39 @@ linkAndWrapDeviceFiles(ArrayRef<SmallVector<OffloadFile>> LinkerInputFiles,
           reportError(createStringError(Err));
         });
     auto LinkerArgs = getLinkerArgs(Input, BaseArgs);
-    bool HasSYCLOffloadKind = false;
-    bool HasNonSYCLOffloadKinds = false;
     uint16_t ActiveOffloadKindMask = 0u;
-    for (const auto &File : Input) {
-      ActiveOffloadKindMask |= File.getBinary()->getOffloadKind();
-      if (File.getBinary()->getOffloadKind() == OFK_SYCL)
-        HasSYCLOffloadKind = true;
-      else
-        HasNonSYCLOffloadKinds = true;
+
+    // The following loop is a repetition of the upstream version. Nothing to do.
+    // TODO: Figure out what to do with writeOffloadFile.
+    SmallVector<StringRef> InputFiles;
+    // Write device inputs to an output file for the linker.
+    for (const OffloadFile &File : Input) {
+      auto FileNameOrErr = writeOffloadFile(File, HasSYCLOffloadKind);
+      if (!FileNameOrErr)
+        return FileNameOrErr.takeError();
+      InputFiles.emplace_back(*FileNameOrErr);
     }
 
-    auto AppendImageToWrapperOutput = [&WrappedOutput,
-                                       &ImageMtx](StringRef ImagePath) {
-      std::scoped_lock Guard(ImageMtx);
-      WrappedOutput.push_back(ImagePath);
-    };
+    // 2. SYCL Specific processing - should happen inside clang-sycl-linker.
+    // Link the remaining device files using the device linker.
+    auto OutputOrErr =
+        linkDevice(InputFiles, LinkerArgs, ActiveOffloadKindMask);
+    if (!OutputOrErr)
+      return OutputOrErr.takeError();
 
-    if (HasSYCLOffloadKind) {
-      // 1) Extraction of compile options
-      Expected<std::pair<std::string, std::string>> CompileLinkOptionsOrErr =
-          extractSYCLCompileLinkOptions(Input);
-      if (!CompileLinkOptionsOrErr)
-        return CompileLinkOptionsOrErr.takeError();
-
-      std::pair<std::string, std::string> &CompileLinkOptions =
-          *CompileLinkOptionsOrErr;
-
-      // Append device compiler and linker options passed via
-      // -device-compiler= and -device-linker= to clang-linker-warpper,
-      // together with options extracted from the image.
-      StringRef DeviceCompilerArgs =
-          LinkerArgs.getLastArgValue(OPT_compiler_arg_EQ);
-      if (!DeviceCompilerArgs.empty()) {
-        CompileLinkOptions.first += " ";
-        CompileLinkOptions.first += DeviceCompilerArgs;
-      }
-      StringRef DeviceLinkerArgs =
-          LinkerArgs.getLastArgValue(OPT_linker_arg_EQ);
-      if (!DeviceLinkerArgs.empty()) {
-        CompileLinkOptions.second += " ";
-        CompileLinkOptions.second += DeviceLinkerArgs;
-      }
-
-      // The following loop is a repetition of the upstream version. Nothing to do.
-      // TODO: Figure out what to do with writeOffloadFile.
-      SmallVector<StringRef> InputFiles;
-      // Write device inputs to an output file for the linker.
-      for (const OffloadFile &File : Input) {
-        auto FileNameOrErr = writeOffloadFile(File, HasSYCLOffloadKind);
-        if (!FileNameOrErr)
-          return FileNameOrErr.takeError();
-        InputFiles.emplace_back(*FileNameOrErr);
-      }
-
-      // 2. SYCL Specific processing - should happen inside clang-sycl-linker.
-      Expected<std::vector<module_split::SplitModule>> ModulesOrErr =
-          sycl::runSYCLOffloadingPipeline(InputFiles, LinkerArgs,
-                                          CompileLinkOptions,
-                                          AppendImageToWrapperOutput);
-      if (!ModulesOrErr)
-        return ModulesOrErr.takeError();
-
-      std::vector<module_split::SplitModule> &Modules = *ModulesOrErr;
-      if (OutputSYCLBIN) {
-        // Maybe, this branch should go into clang-sycl-linker.
-        // Maybe not.
-        SYCLBIN::SYCLBINModuleDesc MD;
-        MD.ArchString = LinkerArgs.getLastArgValue(OPT_arch_EQ);
-        MD.TargetTriple =
-            llvm::Triple{LinkerArgs.getLastArgValue(OPT_triple_EQ)};
-        MD.SplitModules = std::move(Modules);
-        std::scoped_lock<std::mutex> Guard(SYCLBINModulesMtx);
-        SYCLBINModules.emplace_back(std::move(MD));
-      } else {
-        // This is a repetition of upstream version.
-        // TODO(NOM7): Remove this call and use community flow for bundle/wrap
-        Expected<StringRef> OutputFile =
-            sycl::runWrapperAndCompile(Modules, LinkerArgs); // We have to align this functionality with the upstream version of the clang-linker-wrapper.
-        if (!OutputFile)
-          return OutputFile.takeError();
-
-        // SYCL offload kind images are all ready to be sent to host linker.
-        // TODO: Currently, device code wrapping for SYCL offload happens in a
-        // separate path inside 'linkDevice' call seen above.
-        // This will eventually be refactored to use the 'common' wrapping
-        // logic that is used for other offload kinds.
-        AppendImageToWrapperOutput(*OutputFile);
-      }
-    }
-    if (HasNonSYCLOffloadKinds) {
-      // Write any remaining device inputs to an output file.
-      SmallVector<StringRef> InputFiles;
-      for (const OffloadFile &File : Input) {
-        auto FileNameOrErr = writeOffloadFile(File);
-        if (!FileNameOrErr)
-          return FileNameOrErr.takeError();
-        InputFiles.emplace_back(*FileNameOrErr);
-      }
-
-      // Link the remaining device files using the device linker.
-      auto OutputOrErr =
-          linkDevice(InputFiles, LinkerArgs, ActiveOffloadKindMask);
-      if (!OutputOrErr)
-        return OutputOrErr.takeError();
-
+    if (OutputSYCLBIN) { // Questionable.
+      std::vector<module_split::SplitModule> Modules = extractSYCLModules(*OutputOrErr);
+      SYCLBIN::SYCLBINModuleDesc MD;
+      MD.ArchString = LinkerArgs.getLastArgValue(OPT_arch_EQ);
+      MD.TargetTriple =
+          llvm::Triple{LinkerArgs.getLastArgValue(OPT_triple_EQ)};
+      MD.SplitModules = std::move(Modules);
+      std::scoped_lock<std::mutex> Guard(SYCLBINModulesMtx);
+      SYCLBINModules.emplace_back(std::move(MD));
+    } else {
       // Store the offloading image for each linked output file.
       for (OffloadKind Kind = OFK_OpenMP; Kind != OFK_LAST;
-           Kind = static_cast<OffloadKind>((uint16_t)(Kind) << 1)) {
+          Kind = static_cast<OffloadKind>((uint16_t)(Kind) << 1)) {
         if ((ActiveOffloadKindMask & Kind) == 0)
           continue;
         llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> FileOrErr =
@@ -2571,8 +2519,8 @@ linkAndWrapDeviceFiles(ArrayRef<SmallVector<OffloadFile>> LinkerInputFiles,
   }
 
   for (auto &[Kind, Input] : Images) {
-    if (Kind == OFK_SYCL) // We need to remove this in the end.
-      continue;
+    //if (Kind == OFK_SYCL) // We need to remove this in the end.
+    //  continue;
     // We sort the entries before bundling so they appear in a deterministic
     // order in the final binary.
     llvm::sort(Input, [](OffloadingImage &A, OffloadingImage &B) {
@@ -2609,6 +2557,7 @@ linkAndWrapDeviceFiles(ArrayRef<SmallVector<OffloadFile>> LinkerInputFiles,
       continue;
     }
 
+    // Possibly, move sycl speficics of wrapping into the function below.
     auto OutputOrErr = wrapDeviceImages(*BundledImagesOrErr, Args, Kind); // wrap + compile
     if (!OutputOrErr)
       return OutputOrErr.takeError();
